@@ -49,7 +49,7 @@ public class AdminClientController {
 
         String apiKey = generateApiKey();
         Instant now = Instant.now();
-        ClientCredential credential = new ClientCredential(
+        ClientCredential credential = ClientCredential.createNew(
                 request.clientId(),
                 hash(apiKey),
                 request.capacity(),

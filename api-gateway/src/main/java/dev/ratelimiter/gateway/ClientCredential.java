@@ -3,11 +3,21 @@ package dev.ratelimiter.gateway;
 import java.time.Instant;
 
 import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.PersistenceCreator;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
 import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 
+/**
+ * {@code clientId} is client-assigned, not database-generated, so without {@link Persistable}
+ * Spring Data R2DBC sees a non-null id and assumes an UPDATE is needed even for a brand-new row —
+ * issuing an UPDATE that matches zero rows and fails. The persistence constructor (used only to
+ * reconstruct rows already read from the database) marks the instance as not new; {@link #createNew}
+ * is the only way application code should obtain a genuinely new, unsaved instance.
+ */
 @Table("clients")
-public class ClientCredential {
+public class ClientCredential implements Persistable<String> {
 
     @Id
     @Column("client_id")
@@ -34,9 +44,13 @@ public class ClientCredential {
     @Column("updated_at")
     private Instant updatedAt;
 
+    @Transient
+    private boolean isNew;
+
     public ClientCredential() {
     }
 
+    @PersistenceCreator
     public ClientCredential(
             String clientId,
             String apiKeyHash,
@@ -54,6 +68,34 @@ public class ClientCredential {
         this.enabled = enabled;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.isNew = false;
+    }
+
+    /** The only way to obtain an unsaved instance that {@code save()} will INSERT rather than UPDATE. */
+    public static ClientCredential createNew(
+            String clientId,
+            String apiKeyHash,
+            int rateLimitCapacity,
+            int rateLimitRefillTokens,
+            long rateLimitRefillPeriodMillis,
+            boolean enabled,
+            Instant createdAt,
+            Instant updatedAt) {
+        ClientCredential credential = new ClientCredential(
+                clientId, apiKeyHash, rateLimitCapacity, rateLimitRefillTokens,
+                rateLimitRefillPeriodMillis, enabled, createdAt, updatedAt);
+        credential.isNew = true;
+        return credential;
+    }
+
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
+
+    @Override
+    public String getId() {
+        return clientId;
     }
 
     public String getClientId() {
