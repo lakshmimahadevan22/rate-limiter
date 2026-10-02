@@ -1,0 +1,73 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rate_limiter
+      POSTGRES_USER: rate_limiter
+      POSTGRES_PASSWORD: rate_limiter
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rate_limiter -d rate_limiter"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  demo-backend:
+    build:
+      context: .
+      dockerfile: demo-backend/Dockerfile
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DEMO_BACKEND_URL: http://demo-backend:8081
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      DATABASE_URL: r2dbc:postgresql://postgres:5432/rate_limiter
+      DATABASE_JDBC_URL: jdbc:postgresql://postgres:5432/rate_limiter
+      DATABASE_USERNAME: rate_limiter
+      DATABASE_PASSWORD: rate_limiter
+      AUTH_USERNAME: demo
+      AUTH_PASSWORD: demo-password
+      JWT_SECRET: development-only-secret-change-this-before-deploying-please
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      demo-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres-data:

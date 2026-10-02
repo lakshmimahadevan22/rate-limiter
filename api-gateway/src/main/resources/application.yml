@@ -1,0 +1,100 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: demo-hello
+              uri: ${DEMO_BACKEND_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/demo/hello
+                - Method=GET
+              filters:
+                - StripPrefix=2
+                - name: CircuitBreaker
+                  args:
+                    name: demoBackend
+                    fallbackUri: forward:/fallback/demo
+                    statusCodes:
+                      - 500
+                      - 502
+                      - 503
+                      - 504
+            - id: demo-echo
+              uri: ${DEMO_BACKEND_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/demo/echo
+                - Method=POST
+                - Header=X-Demo-Route, enabled
+              filters:
+                - StripPrefix=2
+                - name: CircuitBreaker
+                  args:
+                    name: demoBackend
+                    fallbackUri: forward:/fallback/demo
+                    statusCodes:
+                      - 500
+                      - 502
+                      - 503
+                      - 504
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  r2dbc:
+    url: ${DATABASE_URL:r2dbc:postgresql://localhost:5432/rate_limiter}
+    username: ${DATABASE_USERNAME:rate_limiter}
+    password: ${DATABASE_PASSWORD:rate_limiter}
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    url: ${DATABASE_JDBC_URL:jdbc:postgresql://localhost:5432/rate_limiter}
+    user: ${DATABASE_USERNAME:rate_limiter}
+    password: ${DATABASE_PASSWORD:rate_limiter}
+
+gateway:
+  auth:
+    username: ${AUTH_USERNAME:demo}
+    password: ${AUTH_PASSWORD:demo-password}
+  jwt:
+    algorithm: ${JWT_ALGORITHM:HS256}
+    secret: ${JWT_SECRET:development-only-secret-change-this-before-deploying-please}
+    issuer: ${JWT_ISSUER:rate-limiter-gateway}
+    expiration: ${JWT_EXPIRATION:PT15M}
+    private-key-path: ${JWT_PRIVATE_KEY_PATH:}
+    public-key-path: ${JWT_PUBLIC_KEY_PATH:}
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    key-prefix: ${RATE_LIMIT_KEY_PREFIX:api-gateway:rate-limit:}
+    default-limit:
+      capacity: ${RATE_LIMIT_CAPACITY:10}
+      refill-tokens: ${RATE_LIMIT_REFILL_TOKENS:10}
+      refill-period: ${RATE_LIMIT_REFILL_PERIOD:PT1S}
+    client-limits:
+      demo:
+        capacity: 5
+        refill-tokens: 5
+        refill-period: PT1S
+    tier-cache-ttl: ${RATE_LIMIT_TIER_CACHE_TTL:PT30S}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      demoBackend:
+        register-health-indicator: true
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: ${CIRCUIT_BREAKER_SLIDING_WINDOW_SIZE:10}
+        minimum-number-of-calls: ${CIRCUIT_BREAKER_MINIMUM_CALLS:5}
+        failure-rate-threshold: ${CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD:50}
+        wait-duration-in-open-state: ${CIRCUIT_BREAKER_WAIT_DURATION:10s}
+        permitted-number-of-calls-in-half-open-state: ${CIRCUIT_BREAKER_HALF_OPEN_CALLS:3}
+        automatic-transition-from-open-to-half-open-enabled: true
+  timelimiter:
+    instances:
+      demoBackend:
+        timeout-duration: ${CIRCUIT_BREAKER_TIMEOUT:2s}
+        cancel-running-future: true

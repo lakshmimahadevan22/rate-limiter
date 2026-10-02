@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B -ntp clean install
+
+  docker-build:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build api-gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: api-gateway/Dockerfile
+          push: false
+          tags: rate-limiter/api-gateway:ci
+
+      - name: Build demo-backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: demo-backend/Dockerfile
+          push: false
+          tags: rate-limiter/demo-backend:ci
+
+      - name: Validate docker-compose configuration
+        run: docker compose config
