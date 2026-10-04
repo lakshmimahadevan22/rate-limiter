@@ -76,8 +76,8 @@ gateway:
       refill-period: ${RATE_LIMIT_REFILL_PERIOD:PT1S}
     client-limits:
       demo:
-        capacity: 5
-        refill-tokens: 5
+        capacity: ${DEMO_RATE_LIMIT_CAPACITY:5}
+        refill-tokens: ${DEMO_RATE_LIMIT_REFILL_TOKENS:5}
         refill-period: PT1S
     tier-cache-ttl: ${RATE_LIMIT_TIER_CACHE_TTL:PT30S}
 

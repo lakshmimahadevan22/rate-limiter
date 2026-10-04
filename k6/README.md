@@ -1,9 +1,7 @@
 # Load & performance testing (k6)
 
-Three scripts exercise the gateway under different traffic shapes. **None of these have been run
-against a live stack in this repository** — install k6 and run them yourself against a running
-`docker compose up` stack (or `mvn spring-boot:run` for both modules) to get real numbers; don't
-treat any numbers here as measured results until you've captured them.
+Three scripts exercise the gateway under different traffic shapes. Measured results from a local
+run are recorded [below](#recorded-results).
 
 ## Prerequisites
 
@@ -38,13 +36,17 @@ k6 run k6/burst-traffic.js
 ### `sustained-load.js`
 
 Ramps to 10 req/s and holds it for ~3 minutes. **This exceeds the default `demo` tier (5 req/s)**,
-so run it with the rate limit raised first, or the results will just show rate limiting instead of
-backend/circuit-breaker behavior:
+so run it with the `demo` client's limit raised first, or the results will just show rate limiting
+instead of backend/circuit-breaker behavior. Note that `RATE_LIMIT_CAPACITY` won't help here — it
+only sets the *default* tier, and `demo` has its own override:
 
 ```sh
-RATE_LIMIT_CAPACITY=50 RATE_LIMIT_REFILL_TOKENS=50 docker compose up --build
+DEMO_RATE_LIMIT_CAPACITY=50 DEMO_RATE_LIMIT_REFILL_TOKENS=50 docker compose up --build
 k6 run k6/sustained-load.js
 ```
+
+(Running the jars directly instead of Compose, export the same two variables before starting the
+gateway.)
 
 While it's running, stop and restart `demo-backend` partway through to watch the circuit breaker
 open (responses switch to `503` from the `/fallback/demo` endpoint), then close again once the
@@ -66,17 +68,35 @@ All three scripts accept:
 | `AUTH_USERNAME` | `demo` | Login username for `/auth/token` |
 | `AUTH_PASSWORD` | `demo-password` | Login password for `/auth/token` |
 
-## Recording results
+## Recorded results
 
-After running each script, k6 prints a summary including `http_req_duration` (avg/min/med/max and
-p90/p95) and `http_req_failed`. Fill these in from your own runs — this table is a template, not
-a report:
+k6 omits p99 by default; pass `--summary-trend-stats="avg,med,p(95),p(99),max"` to include it.
 
-| Scenario | p50 | p95 | p99 | Throughput | Error rate | Notes |
+Measured 2026-10-04 on a single local instance of each service (Apple Silicon Mac, gateway,
+demo-backend, Redis 8 and Postgres 14 all on localhost). These numbers show the gateway's own
+overhead and correctness, not what you'd see across a real network.
+
+| Scenario | p50 | p95 | p99 | Throughput | Unexpected errors | Result |
 |---|---|---|---|---|---|---|
-| `normal-traffic.js` | | | | | | |
-| `burst-traffic.js` | | | | | | |
-| `sustained-load.js` | | | | | | |
+| `normal-traffic.js` | 15.5 ms | 19.6 ms | 20.8 ms | 4.0 req/s | 0% (0 / 121) | All thresholds passed |
+| `burst-traffic.js` | 8.7 ms | 22.2 ms | 22.7 ms | 60 requests in ~40 ms | 0% | Exactly 5 × `200` (the burst capacity), 55 × `429`, all with `Retry-After` |
+| `sustained-load.js` | 12.1 ms (`200`) / 9.0 ms (`503`) | 18.5 / 13.0 ms | 23.3 / 17.9 ms | 8.9 req/s avg, 10 req/s peak | 0% (0 / 2,130) | 1,612 × `200`, 517 × fallback `503` during the induced outage |
+
+"Unexpected errors" means any status other than the ones the scenario is designed to produce:
+k6's own `http_req_failed` counts the deliberate `429`s and fallback `503`s as failures.
+
+**Sustained-load timeline** (`demo-backend` killed at t=70s, restarted at t=120s, demo tier raised
+to 50 req/s):
+
+| Window | `200` | `503` | What happened |
+|---|---|---|---|
+| 0–70s | 579 | 0 | Ramp-up to 10 req/s, healthy |
+| 70–120s | 0 | 500 | Backend down: every request served by `/fallback/demo` immediately, with no 5xx errors, timeouts or hung connections reaching the client |
+| 120–130s | 83 | 17 | Backend booting; breaker half-opens, trial calls succeed, breaker closes |
+| 130–240s | 950 | 0 | Fully recovered with no intervention, then the scripted ramp-down |
+
+Fallback responses were *faster* than real ones (p50 9.0 ms vs 12.1 ms), because an open circuit
+short-circuits without waiting on the dead backend.
 
 A known limitation worth noting when interpreting results: `/auth/token` only ever authenticates
 the single hardcoded `demo`/`demo-password` user, so every script run here acts as one client

@@ -55,6 +55,8 @@ services:
       AUTH_USERNAME: demo
       AUTH_PASSWORD: demo-password
       JWT_SECRET: development-only-secret-change-this-before-deploying-please
+      DEMO_RATE_LIMIT_CAPACITY: ${DEMO_RATE_LIMIT_CAPACITY:-5}
+      DEMO_RATE_LIMIT_REFILL_TOKENS: ${DEMO_RATE_LIMIT_REFILL_TOKENS:-5}
     depends_on:
       redis:
         condition: service_healthy
