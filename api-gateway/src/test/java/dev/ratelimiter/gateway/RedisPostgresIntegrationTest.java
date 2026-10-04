@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
@@ -35,9 +34,9 @@ import reactor.core.publisher.Flux;
  * it can safely live alongside the mock-based tests in environments without a Docker daemon.
  *
  * <p>Verifies two things the mocked tests can't: that the token-bucket Lua script is race-safe
- * under real concurrent access to Redis, and that a client tier created through the admin API is
- * actually persisted to Postgres and enforced end to end (auth -> DB-backed tier resolution ->
- * Redis rate limiting -> routing).
+ * under real concurrent access to Redis, and that a client created through the admin API can log in
+ * with its API key and have its Postgres-backed tier enforced end to end (API-key login -> JWT ->
+ * DB-backed tier resolution -> Redis rate limiting -> routing).
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -91,9 +90,6 @@ class RedisPostgresIntegrationTest {
     int port;
 
     @Autowired
-    JwtUtil jwtUtil;
-
-    @Autowired
     ReactiveStringRedisTemplate redisTemplate;
 
     @Autowired
@@ -119,22 +115,42 @@ class RedisPostgresIntegrationTest {
         assertThat(allowedCount).isEqualTo((long) capacity);
     }
 
+    /**
+     * The whole client lifecycle over HTTP only, exactly as an external caller would do it: operator
+     * login, client creation, API-key login, tier enforcement, admin lockout, and revocation.
+     */
     @Test
-    void dynamicClientTierFromDatabaseAppliesAcrossTheFullFilterChain() {
-        String adminToken = jwtUtil.generateToken("demo");
-        String clientId = "tenant-" + UUID.randomUUID();
-
-        client().post().uri("/admin/clients")
-                .headers(headers -> headers.setBearerAuth(adminToken))
-                .bodyValue(Map.of(
-                        "clientId", clientId,
-                        "capacity", 3,
-                        "refillTokens", 3,
-                        "refillPeriodMillis", 1000))
+    void clientLifecycleOverHttpWithDatabaseBackedTier() {
+        String adminToken = client().post().uri("/auth/token")
+                .bodyValue(new AuthController.TokenRequest("demo", "demo-password"))
                 .exchange()
-                .expectStatus().isCreated();
+                .expectStatus().isOk()
+                .expectBody(AuthController.TokenResponse.class)
+                .returnResult().getResponseBody().accessToken();
 
-        String clientToken = jwtUtil.generateToken(clientId);
+        String clientId = "tenant-" + UUID.randomUUID();
+        String apiKey = client().post().uri("/admin/clients")
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .bodyValue(new AdminClientController.CreateClientRequest(clientId, 3, 3, 1000))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(AdminClientController.CreateClientResponse.class)
+                .returnResult().getResponseBody().apiKey();
+
+        client().post().uri("/auth/client-token")
+                .bodyValue(new AuthController.ClientTokenRequest(clientId, "not-the-key"))
+                .exchange()
+                .expectStatus().isUnauthorized();
+
+        String clientToken = clientLogin(clientId, apiKey)
+                .expectStatus().isOk()
+                .expectBody(AuthController.TokenResponse.class)
+                .returnResult().getResponseBody().accessToken();
+
+        client().get().uri("/admin/clients/" + clientId)
+                .headers(headers -> headers.setBearerAuth(clientToken))
+                .exchange()
+                .expectStatus().isForbidden();
 
         for (int i = 0; i < 3; i++) {
             client().get().uri("/api/demo/hello")
@@ -143,11 +159,23 @@ class RedisPostgresIntegrationTest {
                     .expectStatus().isOk()
                     .expectHeader().valueEquals("X-RateLimit-Limit", "3");
         }
-
         client().get().uri("/api/demo/hello")
                 .headers(headers -> headers.setBearerAuth(clientToken))
                 .exchange()
                 .expectStatus().isEqualTo(429)
                 .expectHeader().valueEquals("X-RateLimit-Limit", "3");
+
+        client().delete().uri("/admin/clients/" + clientId)
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .exchange()
+                .expectStatus().isNoContent();
+
+        clientLogin(clientId, apiKey).expectStatus().isUnauthorized();
+    }
+
+    private WebTestClient.ResponseSpec clientLogin(String clientId, String apiKey) {
+        return client().post().uri("/auth/client-token")
+                .bodyValue(new AuthController.ClientTokenRequest(clientId, apiKey))
+                .exchange();
     }
 }

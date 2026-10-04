@@ -37,24 +37,24 @@ class AdminClientControllerTest {
 
         var request = new AdminClientController.CreateClientRequest("acme", 25, 25, 1000);
 
-        StepVerifier.create(controller.createClient(request))
-                .assertNext(response -> {
-                    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-                    var body = response.getBody();
-                    assertThat(body).isNotNull();
-                    assertThat(body.clientId()).isEqualTo("acme");
-                    assertThat(body.apiKey()).isNotBlank();
-                    assertThat(body.capacity()).isEqualTo(25);
-                    assertThat(body.refillTokens()).isEqualTo(25);
-                    assertThat(body.refillPeriodMillis()).isEqualTo(1000);
-                })
-                .verifyComplete();
+        var response = controller.createClient(request).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        var body = response.getBody();
+        assertThat(body).isNotNull();
+        assertThat(body.clientId()).isEqualTo("acme");
+        assertThat(body.capacity()).isEqualTo(25);
+        assertThat(body.refillTokens()).isEqualTo(25);
+        assertThat(body.refillPeriodMillis()).isEqualTo(1000);
 
         var credentialCaptor = org.mockito.ArgumentCaptor.forClass(ClientCredential.class);
         verify(repository).save(credentialCaptor.capture());
         ClientCredential saved = credentialCaptor.getValue();
-        assertThat(saved.getApiKeyHash()).isNotBlank();
+        assertThat(saved.getApiKeyHash()).isNotEqualTo(body.apiKey());
+        assertThat(ApiKeys.matches(body.apiKey(), saved.getApiKeyHash())).isTrue();
         assertThat(saved.isEnabled()).isTrue();
+        assertThat(saved.isNew()).isTrue();
 
         verify(tierResolver).invalidate("acme");
     }

@@ -16,9 +16,9 @@ public class GatewaySecurityConfiguration {
         return http
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
                 .authorizeExchange(exchanges -> exchanges
-                        .pathMatchers("/auth/token").permitAll()
+                        .pathMatchers("/auth/token", "/auth/client-token").permitAll()
                         .pathMatchers("/api/**").authenticated()
-                        .pathMatchers("/admin/**").authenticated()
+                        .pathMatchers("/admin/**").hasRole(Roles.ADMIN)
                         .anyExchange().permitAll())
                 .addFilterAt(jwtAuthenticationWebFilter, SecurityWebFiltersOrder.AUTHENTICATION)
                 .build();

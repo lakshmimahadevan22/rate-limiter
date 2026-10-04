@@ -9,6 +9,7 @@ import static org.mockito.Mockito.doReturn;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
+import java.util.Set;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -116,7 +117,7 @@ class CircuitBreakerIntegrationTest {
     }
 
     private String bearerToken() {
-        return jwtUtil.generateToken("circuit-breaker-test");
+        return jwtUtil.generateToken("circuit-breaker-test", Set.of(Roles.CLIENT));
     }
 
     @Test

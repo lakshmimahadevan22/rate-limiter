@@ -98,10 +98,7 @@ to 50 req/s):
 Fallback responses were *faster* than real ones (p50 9.0 ms vs 12.1 ms), because an open circuit
 short-circuits without waiting on the dead backend.
 
-A known limitation worth noting when interpreting results: `/auth/token` only ever authenticates
-the single hardcoded `demo`/`demo-password` user, so every script run here acts as one client
-(JWT subject `demo`) sharing one rate-limit bucket. The admin API (`/admin/clients`) can configure
-distinct tiers for other client IDs, but there's currently no way to actually log in as one of
-those clients over HTTP — only internal code holding a `JwtUtil` reference can mint a token for an
-arbitrary subject. Multi-tenant load testing would need `/auth/token` (or a new endpoint) extended
-to authenticate against the `clients` table, e.g. by API key.
+All three scripts log in as the operator account, so every request shares the `demo` client's
+single rate-limit bucket. To load-test several independent clients, create them with
+`POST /admin/clients` and have each virtual user log in through `POST /auth/client-token` with its
+own client ID and API key.

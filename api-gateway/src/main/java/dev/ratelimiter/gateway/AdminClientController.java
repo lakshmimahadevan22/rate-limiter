@@ -1,12 +1,6 @@
 package dev.ratelimiter.gateway;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
 import java.time.Instant;
-import java.util.Base64;
-import java.util.HexFormat;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,8 +22,6 @@ import reactor.core.publisher.Mono;
 @RequestMapping("/admin/clients")
 public class AdminClientController {
 
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-
     private final ClientCredentialRepository repository;
     private final ClientTierResolver tierResolver;
 
@@ -47,11 +39,11 @@ public class AdminClientController {
             return Mono.just(ResponseEntity.badRequest().build());
         }
 
-        String apiKey = generateApiKey();
+        String apiKey = ApiKeys.generate();
         Instant now = Instant.now();
         ClientCredential credential = ClientCredential.createNew(
                 request.clientId(),
-                hash(apiKey),
+                ApiKeys.hash(apiKey),
                 request.capacity(),
                 request.refillTokens(),
                 request.refillPeriodMillis(),
@@ -93,21 +85,6 @@ public class AdminClientController {
                         credential.getRateLimitRefillPeriodMillis(),
                         credential.isEnabled())))
                 .defaultIfEmpty(ResponseEntity.notFound().build());
-    }
-
-    private static String generateApiKey() {
-        byte[] bytes = new byte[32];
-        SECURE_RANDOM.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private static String hash(String apiKey) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(apiKey.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is not available", exception);
-        }
     }
 
     public record CreateClientRequest(String clientId, int capacity, int refillTokens, long refillPeriodMillis) {

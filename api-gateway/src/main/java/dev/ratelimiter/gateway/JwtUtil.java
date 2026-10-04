@@ -13,7 +13,9 @@ import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import javax.crypto.SecretKey;
 
@@ -26,6 +28,8 @@ import io.jsonwebtoken.security.Keys;
 
 @Component
 public class JwtUtil {
+
+    public static final String ROLES_CLAIM = "roles";
 
     private final JwtProperties properties;
     private final SecretKey secretKey;
@@ -63,7 +67,7 @@ public class JwtUtil {
         }
     }
 
-    public String generateToken(String subject) {
+    public String generateToken(String subject, Set<String> roles) {
         if (subject == null || subject.isBlank()) {
             throw new IllegalArgumentException("JWT subject must not be blank");
         }
@@ -71,6 +75,7 @@ public class JwtUtil {
         Instant issuedAt = Instant.now();
         var builder = Jwts.builder()
                 .subject(subject)
+                .claim(ROLES_CLAIM, List.copyOf(roles))
                 .issuer(properties.getIssuer())
                 .issuedAt(Date.from(issuedAt))
                 .expiration(Date.from(issuedAt.plus(properties.getExpiration())));

@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.ReactiveAuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -14,6 +15,7 @@ import org.springframework.security.web.server.authentication.HttpStatusServerEn
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatchers;
 import org.springframework.stereotype.Component;
 
+import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import reactor.core.publisher.Mono;
 
@@ -57,10 +59,20 @@ public class JwtAuthenticationWebFilter extends AuthenticationWebFilter {
                         return UsernamePasswordAuthenticationToken.authenticated(
                                 subject,
                                 null,
-                                List.of(new SimpleGrantedAuthority("ROLE_API_CLIENT")));
+                                authorities(claims));
                     })
                     .onErrorMap(JwtException.class,
                             exception -> new BadCredentialsException("Invalid or expired bearer token", exception));
         };
+    }
+
+    private static List<GrantedAuthority> authorities(Claims claims) {
+        if (!(claims.get(JwtUtil.ROLES_CLAIM) instanceof List<?> roles)) {
+            return List.of();
+        }
+        return roles.stream()
+                .filter(String.class::isInstance)
+                .map(role -> (GrantedAuthority) new SimpleGrantedAuthority("ROLE_" + role))
+                .toList();
     }
 }

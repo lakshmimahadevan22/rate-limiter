@@ -8,6 +8,8 @@ import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Base64;
+import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -23,9 +25,18 @@ class JwtUtilTest {
     void signsAndParsesHs256Token() {
         JwtUtil jwtUtil = new JwtUtil(properties("HS256", "test-secret-key-that-is-at-least-32-bytes-long"));
 
-        String token = jwtUtil.generateToken("client-123");
+        String token = jwtUtil.generateToken("client-123", Set.of(Roles.CLIENT));
 
         assertEquals("client-123", jwtUtil.parseToken(token).getSubject());
+    }
+
+    @Test
+    void embedsRolesClaim() {
+        JwtUtil jwtUtil = new JwtUtil(properties("HS256", "test-secret-key-that-is-at-least-32-bytes-long"));
+
+        String token = jwtUtil.generateToken("operator", Set.of(Roles.ADMIN));
+
+        assertEquals(List.of(Roles.ADMIN), jwtUtil.parseToken(token).get(JwtUtil.ROLES_CLAIM, List.class));
     }
 
     @Test
@@ -33,7 +44,7 @@ class JwtUtilTest {
         JwtUtil issuer = new JwtUtil(properties("HS256", "test-secret-key-that-is-at-least-32-bytes-long"));
         JwtUtil verifier = new JwtUtil(properties("HS256", "another-secret-key-that-is-at-least-32-bytes-long"));
 
-        String token = issuer.generateToken("client-123");
+        String token = issuer.generateToken("client-123", Set.of(Roles.CLIENT));
 
         assertThrows(JwtException.class, () -> verifier.parseToken(token));
     }
@@ -53,7 +64,7 @@ class JwtUtilTest {
         properties.setPublicKeyPath(publicKeyPath.toString());
         JwtUtil jwtUtil = new JwtUtil(properties);
 
-        String token = jwtUtil.generateToken("client-456");
+        String token = jwtUtil.generateToken("client-456", Set.of(Roles.CLIENT));
 
         assertEquals("client-456", jwtUtil.parseToken(token).getSubject());
     }
