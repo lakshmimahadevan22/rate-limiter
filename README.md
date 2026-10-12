@@ -12,8 +12,8 @@ flowchart LR
 
     subgraph Gateway["API Gateway :8080"]
         direction TB
-        ReqFilter["GatewayRequestFilter<br/>request-id, logging"]
         AuthFilter["JwtAuthenticationWebFilter<br/>Bearer JWT validation"]
+        ReqFilter["GatewayRequestFilter<br/>request-id, logging"]
         RateLimit["RateLimitingFilter<br/>Redis token bucket"]
         CB["CircuitBreaker + TimeLimiter<br/>per route"]
         Routing["Gateway routing"]
@@ -21,14 +21,14 @@ flowchart LR
         AdminCtrl["AdminClientController<br/>/admin/clients"]
         Fallback["FallbackController<br/>/fallback/demo"]
 
-        ReqFilter --> AuthFilter --> RateLimit --> CB --> Routing
+        AuthFilter --> ReqFilter --> RateLimit --> CB --> Routing
     end
 
     Backend([demo-backend :8081])
     Redis[(Redis)]
     Postgres[(Postgres)]
 
-    Client --> ReqFilter
+    Client --> AuthFilter
     Client --> AuthCtrl
     Client --> AdminCtrl
     Routing --> Backend
@@ -40,7 +40,7 @@ flowchart LR
     AdminCtrl -.->|cache invalidation| Redis
 ```
 
-A request to `/api/**` passes through, in order: request-ID tagging and logging, JWT bearer validation (401 if missing/invalid), Redis-backed rate limiting keyed by JWT subject (429 if exhausted), then a per-route circuit breaker before the backend is actually called (503 from `/fallback/demo` if the breaker is open or the call times out). `/auth/token` and `/admin/clients` bypass routing entirely — they're plain `@RestController`s, not gateway routes, so neither is rate-limited or circuit-broken.
+A request to `/api/**` passes through, in order: JWT bearer validation (401 if missing/invalid), request-ID tagging and logging, Redis-backed rate limiting keyed by JWT subject (429 if exhausted), then a per-route circuit breaker before the backend is actually called (503 from `/fallback/demo` if the breaker is open or the call times out). JWT validation is part of the Spring Security filter chain, which runs before any gateway filter, so requests rejected with 401 are not logged and get no `X-Request-Id`. `/auth/token`, `/auth/client-token` and `/admin/clients` bypass routing entirely — they're plain `@RestController`s, not gateway routes, so none of them is rate-limited or circuit-broken.
 
 ## Modules
 
@@ -51,6 +51,7 @@ A request to `/api/**` passes through, in order: request-ID tagging and logging,
 
 - Java 21 or later
 - Apache Maven 3.9 or later
+- Docker, to run the whole stack with Docker Compose and for the Testcontainers tests; or, to run the jars directly, Redis and PostgreSQL on their default local ports (the gateway expects a `rate_limiter` database, user and password)
 
 ## Build
 
@@ -60,7 +61,7 @@ mvn clean install
 
 ## Run
 
-Start the gateway:
+With Redis and Postgres running locally (or see [Run with Docker Compose](#run-with-docker-compose) to start everything with one command), start the gateway:
 
 ```sh
 mvn -pl api-gateway spring-boot:run
@@ -91,7 +92,7 @@ TOKEN=$(curl -s http://localhost:8080/auth/token \
 
 Requests under `/api/**` require `Authorization: Bearer <token>`. JWTs use HS256 by default; set `JWT_ALGORITHM=RS256`, `JWT_PRIVATE_KEY_PATH`, and `JWT_PUBLIC_KEY_PATH` to use PKCS#8 private and X.509 public PEM keys. Replace the development JWT secret with `JWT_SECRET` before deployment.
 
-Authenticated API requests are rate-limited by JWT subject using an atomic Redis token bucket. The default limit is 10 requests per second with a burst capacity of 10; the `demo` client has a 5-request burst and refill rate. Configure `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_TOKENS`, and `RATE_LIMIT_REFILL_PERIOD` for the default tier, or add client entries under `gateway.rate-limit.client-limits`. Throttled requests receive `429 Too Many Requests` and a `Retry-After` header. Redis must be available for rate-limited routes: if it's unreachable, the gateway fails closed and returns `503` rather than letting unmetered traffic through.
+Authenticated API requests are rate-limited by JWT subject using an atomic Redis token bucket. The default limit is 10 requests per second with a burst capacity of 10; the `demo` client has a 5-request burst and refill rate. Configure `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_TOKENS`, and `RATE_LIMIT_REFILL_PERIOD` for the default tier, or add client entries under `gateway.rate-limit.client-limits`. Throttled requests receive `429 Too Many Requests` and a `Retry-After` header. Redis must be available for rate-limited routes: if it's unreachable, the gateway fails closed and returns `503` immediately rather than letting unmetered traffic through. Redis commands time out after `REDIS_TIMEOUT` (default `1s`), and commands are rejected rather than queued while the connection is down, so an outage never leaves requests hanging.
 
 ## Try the routes
 
@@ -110,11 +111,11 @@ The GET route matches `Path` and `Method`; the POST route additionally requires 
 
 ## Fault tolerance
 
-Both demo routes are wrapped in a Resilience4j circuit breaker (`demoBackend`) with a `TimeLimiter`. A 5xx response from `demo-backend`, or a call that exceeds the timeout, counts as a failure; once the failure-rate threshold is breached over the sliding window, the circuit opens and requests are routed straight to a fallback (`/fallback/demo`, `503 Service Unavailable`) instead of hitting the backend. After `wait-duration-in-open-state` elapses, the circuit automatically moves to half-open, allows a limited number of trial calls through, and closes again once those succeed. Tune it with `CIRCUIT_BREAKER_SLIDING_WINDOW_SIZE`, `CIRCUIT_BREAKER_MINIMUM_CALLS`, `CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD`, `CIRCUIT_BREAKER_WAIT_DURATION`, `CIRCUIT_BREAKER_HALF_OPEN_CALLS`, and `CIRCUIT_BREAKER_TIMEOUT`.
+Both demo routes are wrapped in a Resilience4j circuit breaker (`demoBackend`) with a `TimeLimiter`. A `500`, `502`, `503` or `504` response from `demo-backend`, or a call that exceeds the timeout, counts as a failure; once the failure-rate threshold is breached over the sliding window, the circuit opens and requests are routed straight to a fallback (`/fallback/demo`, `503 Service Unavailable`) instead of hitting the backend. After `wait-duration-in-open-state` elapses, the circuit automatically moves to half-open, allows a limited number of trial calls through, and closes again once those succeed. Tune it with `CIRCUIT_BREAKER_SLIDING_WINDOW_SIZE`, `CIRCUIT_BREAKER_MINIMUM_CALLS`, `CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD`, `CIRCUIT_BREAKER_WAIT_DURATION`, `CIRCUIT_BREAKER_HALF_OPEN_CALLS`, and `CIRCUIT_BREAKER_TIMEOUT`.
 
 ## Dynamic, database-backed rate-limit tiers
 
-Client rate-limit tiers can be managed at runtime instead of only through static YAML. A `clients` table (Flyway-migrated on startup; requires Postgres) stores a per-client capacity/refill tier, an API key hash, and an enabled flag. `ClientTierResolver` looks up a client's tier on each rate-limited request by checking a Redis cache first, then falling back to Postgres on a cache miss (repopulating the cache), and finally falling back to the static `gateway.rate-limit` YAML configuration if the client has no row, is disabled, or Redis/Postgres are unavailable. This means the gateway degrades gracefully to its static defaults with no request-path failures if the database is down.
+Client rate-limit tiers can be managed at runtime instead of only through static YAML. A `clients` table (Flyway-migrated on startup; requires Postgres) stores a per-client capacity/refill tier, an API key hash, and an enabled flag. `ClientTierResolver` looks up a client's tier on each rate-limited request by checking a Redis cache first, then falling back to Postgres on a cache miss (repopulating the cache), and finally falling back to the static `gateway.rate-limit` YAML configuration if the client has no row, is disabled, or the tier can't be read. This means a Postgres outage doesn't fail API requests: clients are simply rate-limited under the static configuration until it's back. (Redis is different: it also holds the token buckets themselves, so without it rate-limited routes return `503`, as described above.)
 
 Manage clients with the admin API, using an operator (`ADMIN`) token:
 
@@ -145,9 +146,9 @@ The full admin API (all endpoints require an `ADMIN` token):
 | `GET /admin/clients/{clientId}` | Inspect one client. |
 | `PATCH /admin/clients/{clientId}` | Change any of `capacity`, `refillTokens`, `refillPeriodMillis` and `enabled`; omitted fields are unchanged. `{"enabled":true}` re-enables a revoked client. |
 | `POST /admin/clients/{clientId}/api-key` | Rotate the API key: returns a new one-time key, and the old key stops working for new logins. |
-| `DELETE /admin/clients/{clientId}` | Revoke the client: it can no longer log in and falls back to the static default tier. |
+| `DELETE /admin/clients/{clientId}` | Revoke the client: it can no longer log in, and any token it still holds is rate-limited under the static configuration instead of its tier. |
 
-Every change evicts the client's cached tier, so a new tier applies on the very next request rather than after the cache TTL. Configure the cache TTL with `RATE_LIMIT_TIER_CACHE_TTL` (default `PT30S`), and point at your own database with `DATABASE_URL`, `DATABASE_JDBC_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`. Set `FLYWAY_ENABLED=false` to run without Postgres (dynamic tiers are then unavailable and every client uses the static configuration).
+Every create, tier change, revoke or re-enable evicts the client's cached tier, so a new tier applies on the very next request rather than after the cache TTL. Configure the cache TTL with `RATE_LIMIT_TIER_CACHE_TTL` (default `PT30S`), and point at your own database with `DATABASE_URL`, `DATABASE_JDBC_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`. Set `FLYWAY_ENABLED=false` to start the gateway without Postgres. Operator login and `/api/**` then work under the static configuration only: client login and the admin API return `500`, and `/actuator/health` reports `DOWN` because the database health check fails.
 
 ## Run with Docker Compose
 
@@ -178,12 +179,12 @@ To check the running system end to end, start the stack (`docker compose up --bu
 ./scripts/smoke-test.sh
 ```
 
-It walks every feature over plain HTTP in about a second — login, JWT rejection, routing predicates, client creation and duplicate rejection, client login and admin lockout, throttling with `Retry-After`, a live tier change, key rotation, revocation and re-enabling — and exits non-zero on the first unexpected status. It needs `curl` and `jq`.
+It checks the main features over plain HTTP in under a second — login, JWT rejection, routing predicates, client creation and duplicate rejection, client login and admin lockout, throttling with `Retry-After`, a live tier change, key rotation, revocation and re-enabling — and exits non-zero on the first unexpected status. It needs `curl` and `jq`. (The circuit breaker is covered by `CircuitBreakerIntegrationTest` and the `sustained-load.js` k6 script instead, since exercising it means stopping the backend.)
 
 The suite is layered:
 
-- **Unit tests** — `JwtUtilTest`, `RateLimitPropertiesTest` (validation and tier resolution), `RateLimitPropertiesBindingTest` (relaxed YAML/env config binding via `ApplicationContextRunner`), `RateLimitingFilterTest` (allow/deny/unavailable/unauthenticated/disabled paths, fully mocked), `ClientTierResolverTest`, `AdminClientControllerTest`, `AuthControllerTest` (client login: valid key, wrong key, unknown and revoked clients), and `ApiKeysTest` — no external services required.
-- **Integration tests** — `JwtAuthenticationIntegrationTest` and `CircuitBreakerIntegrationTest` boot the full gateway with a mocked Redis template and an embedded fake backend, covering the auth filter chain, role checks on the admin API (`401` without a token, `403` for a client, allowed for an admin), rate-limit headers, and circuit breaker/fallback/time-limiter behavior without any containers.
+- **Unit tests** — `JwtUtilTest`, `RateLimitPropertiesTest` (validation and tier resolution), `RateLimitPropertiesBindingTest` (relaxed YAML/env config binding via `ApplicationContextRunner`), `RateLimitingFilterTest` (allow/deny/unavailable/unauthenticated/disabled paths, fully mocked), `ClientTierResolverTest`, `AdminClientControllerTest`, `AuthControllerTest` (operator login, and client login with a valid key, wrong key, unknown and revoked clients), and `ApiKeysTest` — no external services required.
+- **Integration tests** — `JwtAuthenticationIntegrationTest` and `CircuitBreakerIntegrationTest` boot the full gateway with a mocked Redis template (`CircuitBreakerIntegrationTest` also runs an embedded fake backend), covering the auth filter chain, role checks on the admin API (`401` without a token, `403` for a client, allowed for an admin), rate-limit headers, and circuit breaker/fallback/time-limiter behavior without any containers.
 - **Testcontainers integration tests** — `RedisPostgresIntegrationTest` spins up real Redis and Postgres containers to verify the token-bucket Lua script is race-safe under concurrent load, and the full client lifecycle over plain HTTP: operator login, client creation, API-key login, tier enforcement, admin lockout, duplicate rejection, live tier updates, key rotation, revocation and re-enabling. This class requires Docker; it's annotated `@Testcontainers(disabledWithoutDocker = true)` and is skipped automatically (not failed) when no Docker daemon is available, so `mvn test` stays green either way.
 
 ## CI/CD
@@ -206,15 +207,7 @@ A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pu
 
 - **R2DBC vs. JPA/Hibernate.** R2DBC keeps the client-tier lookup non-blocking, consistent with the rest of the reactive pipeline — a blocking JPA call on the event-loop thread would stall every other in-flight request being handled by that thread. The cost: R2DBC is less mature (no lazy loading, fewer query-derivation conveniences, smaller community) and Flyway itself still needs a separate blocking JDBC driver and connection (`spring.flyway.url`) for migrations, since Flyway has no reactive execution model. Both drivers end up on the classpath as a result.
 - **Token bucket vs. sliding window, revisited.** Token bucket was chosen project-wide (see above), but it's worth noting what's given up: a sliding window log would give an exact "no more than N requests in the last T seconds" guarantee with no burst allowance at all, which suits strict API quotas better than bursty client traffic. This project optimized for the latter.
-- **Redis-cache-then-Postgres-then-static-YAML for tiers, not DB-only.** Reading Postgres on every rate-limited request would add a network round-trip (and a request-path failure mode) to every single API call. Layering a Redis cache in front, with the static YAML config as a last-resort fallback when both Redis and Postgres are unavailable (`ClientTierResolver`), trades a small amount of tier-change propagation delay (bounded by `RATE_LIMIT_TIER_CACHE_TTL`) for a gateway that degrades to "static defaults" instead of "every request fails" during a database or cache outage.
+- **Redis-cache-then-Postgres-then-static-YAML for tiers, not DB-only.** Reading Postgres on every rate-limited request would add a network round-trip (and a request-path failure mode) to every single API call. Layering a Redis cache in front, with the static YAML config as a last-resort fallback when a tier can't be read (`ClientTierResolver`), means a database outage degrades the gateway to "static defaults" instead of "every request fails". Admin changes evict the cached tier so they apply immediately; the cache TTL (`RATE_LIMIT_TIER_CACHE_TTL`) only bounds how long a tier changed directly in the database, bypassing the admin API, can stay stale.
 - **HS256 by default, RS256 supported.** HS256 (shared secret) is simplest for a single-issuer gateway that both signs and verifies its own tokens. RS256 (asymmetric key pair) is supported via `JWT_ALGORITHM=RS256` for the case where other services need to verify gateway-issued tokens without being trusted with the signing key — the public key can be distributed freely, the private key stays only on the gateway.
-- **Revoke, don't delete, admin clients.** `DELETE /admin/clients/{clientId}` sets `enabled = false` rather than removing the row. This preserves the audit trail (who had what tier, when) and means a revoked client's ID can't be silently reused by someone else creating a new client with the same ID — recreating an existing row's primary key would conflict rather than quietly resurrecting a revoked client's history.
+- **Revoke, don't delete, admin clients.** `DELETE /admin/clients/{clientId}` sets `enabled = false` rather than removing the row. This keeps the client's record (its last tier and when it was created and last changed) and means a revoked client's ID can't be silently reused by someone else creating a new client with the same ID — recreating an existing row's primary key would conflict rather than quietly resurrecting a revoked client's history.
 - **Revocation blocks new logins, not tokens already issued.** A revoked client can't get a new token, but one it already holds stays valid until it expires (`JWT_EXPIRATION`, 15 minutes by default). Rejecting it immediately would mean checking revocation status on every API request, adding a cache or database lookup to each call. Short token lifetimes keep the window small; lower `JWT_EXPIRATION` if that window matters more than token-refresh traffic.
-
-## Release
-
-Phases 0–10 of [PLAN.md](PLAN.md) are complete as of `v1.0.0`; see the file's phase-by-phase checkpoints for what "complete" means at each stage.
-
-## Possible next steps
-
-Not needed for the demo, but what a production deployment would add: real operator accounts instead of the single configured login, rate limiting on `/auth/*` itself to slow down credential guessing, secrets from a secret manager rather than environment defaults, a configurable fail-open/fail-closed choice when Redis is down (it currently returns `503`), and Prometheus metrics for allowed/throttled requests and breaker state.
