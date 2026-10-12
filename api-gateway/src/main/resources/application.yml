@@ -48,6 +48,7 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      timeout: ${REDIS_TIMEOUT:1s}
   r2dbc:
     url: ${DATABASE_URL:r2dbc:postgresql://localhost:5432/rate_limiter}
     username: ${DATABASE_USERNAME:rate_limiter}
