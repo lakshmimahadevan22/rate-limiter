@@ -91,7 +91,7 @@ TOKEN=$(curl -s http://localhost:8080/auth/token \
 
 Requests under `/api/**` require `Authorization: Bearer <token>`. JWTs use HS256 by default; set `JWT_ALGORITHM=RS256`, `JWT_PRIVATE_KEY_PATH`, and `JWT_PUBLIC_KEY_PATH` to use PKCS#8 private and X.509 public PEM keys. Replace the development JWT secret with `JWT_SECRET` before deployment.
 
-Authenticated API requests are rate-limited by JWT subject using an atomic Redis token bucket. The default limit is 10 requests per second with a burst capacity of 10; the `demo` client has a 5-request burst and refill rate. Configure `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_TOKENS`, and `RATE_LIMIT_REFILL_PERIOD` for the default tier, or add client entries under `gateway.rate-limit.client-limits`. Throttled requests receive `429 Too Many Requests` and a `Retry-After` header. Redis must be available for rate-limited routes.
+Authenticated API requests are rate-limited by JWT subject using an atomic Redis token bucket. The default limit is 10 requests per second with a burst capacity of 10; the `demo` client has a 5-request burst and refill rate. Configure `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_TOKENS`, and `RATE_LIMIT_REFILL_PERIOD` for the default tier, or add client entries under `gateway.rate-limit.client-limits`. Throttled requests receive `429 Too Many Requests` and a `Retry-After` header. Redis must be available for rate-limited routes: if it's unreachable, the gateway fails closed and returns `503` rather than letting unmetered traffic through.
 
 ## Try the routes
 
@@ -134,7 +134,20 @@ CLIENT_TOKEN=$(curl -s http://localhost:8080/auth/client-token \
 curl -i http://localhost:8080/api/demo/hello -H "Authorization: Bearer $CLIENT_TOKEN"
 ```
 
-An unknown client ID, a wrong key and a revoked client all get the same `401`, so the endpoint can't be used to discover which client IDs exist. `DELETE /admin/clients/{clientId}` revokes a client (it can no longer log in, its DB tier is disabled and the cache evicted), and `GET /admin/clients/{clientId}` inspects its current tier. Configure the cache TTL with `RATE_LIMIT_TIER_CACHE_TTL` (default `PT30S`), and point at your own database with `DATABASE_URL`, `DATABASE_JDBC_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`. Set `FLYWAY_ENABLED=false` to run without Postgres (dynamic tiers are then unavailable and every client uses the static configuration).
+An unknown client ID, a wrong key and a revoked client all get the same `401`, so the endpoint can't be used to discover which client IDs exist.
+
+The full admin API (all endpoints require an `ADMIN` token):
+
+| Method & path | What it does |
+|---|---|
+| `POST /admin/clients` | Create a client and return its one-time API key. `409` if the ID already exists (including revoked clients); `400` if the ID isn't 1–100 characters of letters, digits, `.`, `_` or `-`, or any tier value isn't positive. |
+| `GET /admin/clients` | List all clients and their tiers. |
+| `GET /admin/clients/{clientId}` | Inspect one client. |
+| `PATCH /admin/clients/{clientId}` | Change any of `capacity`, `refillTokens`, `refillPeriodMillis` and `enabled`; omitted fields are unchanged. `{"enabled":true}` re-enables a revoked client. |
+| `POST /admin/clients/{clientId}/api-key` | Rotate the API key: returns a new one-time key, and the old key stops working for new logins. |
+| `DELETE /admin/clients/{clientId}` | Revoke the client: it can no longer log in and falls back to the static default tier. |
+
+Every change evicts the client's cached tier, so a new tier applies on the very next request rather than after the cache TTL. Configure the cache TTL with `RATE_LIMIT_TIER_CACHE_TTL` (default `PT30S`), and point at your own database with `DATABASE_URL`, `DATABASE_JDBC_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD`. Set `FLYWAY_ENABLED=false` to run without Postgres (dynamic tiers are then unavailable and every client uses the static configuration).
 
 ## Run with Docker Compose
 
@@ -159,15 +172,23 @@ Postgres data persists in the `postgres-data` volume across restarts; `docker co
 mvn test
 ```
 
+To check the running system end to end, start the stack (`docker compose up --build`, or the two jars plus local Redis and Postgres) and run:
+
+```sh
+./scripts/smoke-test.sh
+```
+
+It walks every feature over plain HTTP in about a second — login, JWT rejection, routing predicates, client creation and duplicate rejection, client login and admin lockout, throttling with `Retry-After`, a live tier change, key rotation, revocation and re-enabling — and exits non-zero on the first unexpected status. It needs `curl` and `jq`.
+
 The suite is layered:
 
 - **Unit tests** — `JwtUtilTest`, `RateLimitPropertiesTest` (validation and tier resolution), `RateLimitPropertiesBindingTest` (relaxed YAML/env config binding via `ApplicationContextRunner`), `RateLimitingFilterTest` (allow/deny/unavailable/unauthenticated/disabled paths, fully mocked), `ClientTierResolverTest`, `AdminClientControllerTest`, `AuthControllerTest` (client login: valid key, wrong key, unknown and revoked clients), and `ApiKeysTest` — no external services required.
 - **Integration tests** — `JwtAuthenticationIntegrationTest` and `CircuitBreakerIntegrationTest` boot the full gateway with a mocked Redis template and an embedded fake backend, covering the auth filter chain, role checks on the admin API (`401` without a token, `403` for a client, allowed for an admin), rate-limit headers, and circuit breaker/fallback/time-limiter behavior without any containers.
-- **Testcontainers integration tests** — `RedisPostgresIntegrationTest` spins up real Redis and Postgres containers to verify the token-bucket Lua script is race-safe under concurrent load, and the full client lifecycle over plain HTTP: operator login, client creation, API-key login, tier enforcement, admin lockout and revocation. This class requires Docker; it's annotated `@Testcontainers(disabledWithoutDocker = true)` and is skipped automatically (not failed) when no Docker daemon is available, so `mvn test` stays green either way.
+- **Testcontainers integration tests** — `RedisPostgresIntegrationTest` spins up real Redis and Postgres containers to verify the token-bucket Lua script is race-safe under concurrent load, and the full client lifecycle over plain HTTP: operator login, client creation, API-key login, tier enforcement, admin lockout, duplicate rejection, live tier updates, key rotation, revocation and re-enabling. This class requires Docker; it's annotated `@Testcontainers(disabledWithoutDocker = true)` and is skipped automatically (not failed) when no Docker daemon is available, so `mvn test` stays green either way.
 
 ## CI/CD
 
-A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`: it builds the project and runs the full test suite with `mvn clean install` (Maven dependencies cached between runs via `actions/setup-java`), then builds both Docker images with Buildx and validates `docker-compose.yml`. GitHub-hosted runners ship with Docker preinstalled, so `RedisPostgresIntegrationTest`'s Testcontainers run for real in CI instead of skipping.
+A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`: it builds the project and runs the full test suite with `mvn clean install` (Maven dependencies cached between runs via `actions/setup-java`), then builds both Docker images with Buildx and validates `docker-compose.yml`. A third job brings up the whole stack with `docker compose up --wait` and runs `scripts/smoke-test.sh` against it, so every push is verified end to end over real HTTP, not just through tests. GitHub-hosted runners ship with Docker preinstalled, so `RedisPostgresIntegrationTest`'s Testcontainers run for real in CI instead of skipping.
 
 ## Load & performance testing
 
@@ -192,4 +213,8 @@ A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pu
 
 ## Release
 
-Phases 0–10 of [PLAN.md](PLAN.md) are complete as of this version; see the file's phase-by-phase checkpoints for what "complete" means at each stage. This is the `v1.0.0` baseline.
+Phases 0–10 of [PLAN.md](PLAN.md) are complete as of `v1.0.0`; see the file's phase-by-phase checkpoints for what "complete" means at each stage.
+
+## Possible next steps
+
+Not needed for the demo, but what a production deployment would add: real operator accounts instead of the single configured login, rate limiting on `/auth/*` itself to slow down credential guessing, secrets from a secret manager rather than environment defaults, a configurable fail-open/fail-closed choice when Redis is down (it currently returns `503`), and Prometheus metrics for allowed/throttled requests and breaker state.

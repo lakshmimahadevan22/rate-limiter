@@ -117,7 +117,8 @@ class RedisPostgresIntegrationTest {
 
     /**
      * The whole client lifecycle over HTTP only, exactly as an external caller would do it: operator
-     * login, client creation, API-key login, tier enforcement, admin lockout, and revocation.
+     * login, client creation, API-key login, tier enforcement, admin lockout, duplicate rejection, tier
+     * updates, key rotation, revocation and re-enabling.
      */
     @Test
     void clientLifecycleOverHttpWithDatabaseBackedTier() {
@@ -165,12 +166,45 @@ class RedisPostgresIntegrationTest {
                 .expectStatus().isEqualTo(429)
                 .expectHeader().valueEquals("X-RateLimit-Limit", "3");
 
+        client().post().uri("/admin/clients")
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .bodyValue(new AdminClientController.CreateClientRequest(clientId, 3, 3, 1000))
+                .exchange()
+                .expectStatus().isEqualTo(409);
+
+        client().patch().uri("/admin/clients/" + clientId)
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .bodyValue(new AdminClientController.UpdateClientRequest(50, 50, null, null))
+                .exchange()
+                .expectStatus().isOk();
+        client().get().uri("/api/demo/hello")
+                .headers(headers -> headers.setBearerAuth(clientToken))
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().valueEquals("X-RateLimit-Limit", "50");
+
+        String rotatedKey = client().post().uri("/admin/clients/" + clientId + "/api-key")
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(AdminClientController.ApiKeyResponse.class)
+                .returnResult().getResponseBody().apiKey();
+        clientLogin(clientId, apiKey).expectStatus().isUnauthorized();
+        clientLogin(clientId, rotatedKey).expectStatus().isOk();
+
         client().delete().uri("/admin/clients/" + clientId)
                 .headers(headers -> headers.setBearerAuth(adminToken))
                 .exchange()
                 .expectStatus().isNoContent();
 
-        clientLogin(clientId, apiKey).expectStatus().isUnauthorized();
+        clientLogin(clientId, rotatedKey).expectStatus().isUnauthorized();
+
+        client().patch().uri("/admin/clients/" + clientId)
+                .headers(headers -> headers.setBearerAuth(adminToken))
+                .bodyValue(new AdminClientController.UpdateClientRequest(null, null, null, true))
+                .exchange()
+                .expectStatus().isOk();
+        clientLogin(clientId, rotatedKey).expectStatus().isOk();
     }
 
     private WebTestClient.ResponseSpec clientLogin(String clientId, String apiKey) {
